@@ -1,0 +1,32 @@
+# DeepFaceLab 설정 파일
+model:
+  name: "SAE"  # SAE, LIAE, DF
+  resolution: 256
+  face_type: "f"  # f: full face, wf: whole face, head: head
+  archi: "df"  # df, liae
+  
+training:
+  batch_size: 8
+  learning_rate: 5e-5
+  epochs: 1000
+  save_interval: 100
+  preview_interval: 25
+  
+data:
+  source_dir: "data/processed/source"
+  target_dir: "data/processed/target"
+  output_dir: "data/processed/deepfacelab"
+  
+preprocessing:
+  face_detector: "mtcnn"  # mtcnn, dlib, opencv
+  face_alignment: true
+  face_mask: true
+  blur_threshold: 0.5
+  
+inference:
+  output_resolution: 256
+  face_mask_type: "f"  # f: full face, wf: whole face
+  color_transfer: "rct"  # rct, lct, mkl, idt, sot
+  sharpen: true
+  temporal_smoothing: true
+

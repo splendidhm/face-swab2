@@ -1,0 +1,78 @@
+# 기본 설정 파일
+logging:
+  level: "INFO"
+  file: "logs/face_swap.log"
+
+preprocessing:
+  face_detector: "mediapipe"
+  face_alignment: true
+  face_mask: true
+  blur_threshold: 0.5
+  sample_rate: 1
+
+model:
+  type: "deepfacelab"  # deepfacelab, fomm
+  resolution: 256
+  face_type: "f"
+  archi: "df"
+
+training:
+  batch_size: 8
+  learning_rate: 5e-5
+  epochs: 1000
+  save_interval: 100
+  preview_interval: 25
+
+data:
+  source_dir: "data/processed/source"
+  target_dir: "data/processed/target"
+  output_dir: "data/processed"
+
+inference:
+  output_resolution: 256
+  face_mask_type: "f"
+  color_transfer: "rct"
+  sharpen: true
+  temporal_smoothing: true
+
+postprocessing:
+  color_correction:
+    enabled: true
+    method: "histogram_matching"
+  
+  temporal_smoothing:
+    enabled: true
+    window_size: 5
+    method: "gaussian"
+  
+  blending:
+    enabled: true
+    method: "poisson"
+
+enhancement:
+  noise_reduction:
+    enabled: true
+    method: "bilateral"
+    strength: 1.0
+  
+  enhancement:
+    enabled: true
+    method: "unsharp_mask"
+    strength: 1.0
+  
+  edge_enhancement:
+    enabled: false
+    method: "canny"
+    strength: 1.0
+  
+  super_resolution:
+    enabled: false
+    method: "bicubic"
+    scale_factor: 2.0
+
+audio:
+  sample_rate: 22050
+  enhancement: true
+  lip_sync: true
+  tts: false
+

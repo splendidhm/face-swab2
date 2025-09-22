@@ -1,0 +1,34 @@
+# First Order Motion Model 설정 파일
+model:
+  name: "FOMM"
+  generator_checkpoint: "checkpoints/vox.pth.tar"
+  kp_detector_checkpoint: "checkpoints/vox.pth.tar"
+  
+training:
+  batch_size: 4
+  learning_rate: 2e-4
+  epochs: 200
+  save_interval: 50
+  preview_interval: 10
+  
+data:
+  source_dir: "data/processed/source"
+  target_dir: "data/processed/target"
+  output_dir: "data/processed/fomm"
+  
+preprocessing:
+  image_size: 256
+  normalize_mean: [0.5, 0.5, 0.5]
+  normalize_std: [0.5, 0.5, 0.5]
+  
+inference:
+  output_resolution: 256
+  relative: true
+  adapt_movement_scale: true
+  use_absolute_reference: false
+  
+keypoints:
+  num_kp: 10
+  temperature: 0.1
+  jacobian: true
+
