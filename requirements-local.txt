@@ -1,0 +1,6 @@
+numpy==2.2.6
+opencv-contrib-python==4.11.0.86
+mediapipe==0.10.32
+Pillow==11.3.0
+scipy==1.15.3
+imageio-ffmpeg==0.6.0
