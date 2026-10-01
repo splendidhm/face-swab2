@@ -149,6 +149,28 @@ class LocalPipelineTests(unittest.TestCase):
         self.assertGreater(report['identity_applied_strength_mean'], 0)
         self.assertLessEqual(report['identity_applied_strength_mean'], settings.identity)
 
+    def test_live_mask_strength_changes_are_applied_and_recorded(self):
+        from unittest.mock import patch
+        from src.local.masking import MaskStrengthControl
+        control = MaskStrengthControl(0)
+        applied = []
+        real_composite = composite
+        def inspect(*args, **kwargs):
+            applied.append(kwargs['strength'])
+            return real_composite(*args, **kwargs)
+        def progress(fraction,message):
+            if fraction < .9 and len(applied) == 5:
+                control.set_level(1)
+            elif fraction < .9 and len(applied) == 10:
+                control.set_level(3)
+        with patch('src.local.pipeline.composite',side_effect=inspect):
+            report = render_video(self.normalized,self.asset,{0:self.box},self.folder/'live-mask.mp4',
+                                  self.model,progress=progress,force_region=True,mask_control=control)
+        self.assertEqual(applied,[.25]*5+[.5]*5+[1.]*8)
+        self.assertEqual([(e['frame'],e['level']) for e in report['masking_strength_events']],
+                         [(0,'low'),(5,'midium'),(10,'very strong')])
+        self.assertEqual(report['frames'],18)
+
     def test_cancel_and_output_protection(self):
         event = threading.Event()
         event.set()

@@ -139,6 +139,8 @@ def extract_face(path, output, landmarker):
 def composite(frame, asset, target_points=None, target_box=None, strength=1.0,
               landmarker=None, blend_state=None, settings=None, identity_state=None):
     """Dense expression mesh with semantic matting and preserved eye/mouth interiors."""
+    if not np.isfinite(strength) or not 0 <= strength <= 1:
+        raise ValueError('마스킹 강도는 0~1 사이여야 합니다.')
     settings = settings or CompositeSettings()
     box = bbox(target_points[OVAL]) if target_points is not None else target_box
     try:
@@ -170,14 +172,18 @@ def composite(frame, asset, target_points=None, target_box=None, strength=1.0,
             interiors, coverage = dense_warp(driving, destination, (h, w))
             interiors = np.where((coverage > .5)[..., None], interiors, roi)
         alpha *= 1-openings
-    alpha = np.clip(alpha*strength, 0, 1)
+    alpha = np.clip(alpha, 0, 1)
     warped = match_lighting(warped, roi, alpha, blend_state, settings)
     # Extend colors into transparent pixels before pyramid filtering to avoid dark halos.
     warped = np.where((alpha > .01)[..., None], warped, roi)
     output = frame.copy()
     blended = multiband_blend(warped, roi, alpha)
     if interiors is not None:
-        support = openings*interior_protection*np.clip(strength, 0, 1)
+        support = openings*interior_protection
         blended = blended*(1-support[..., None])+interiors*support[..., None]
+    # Crossfade the fully processed face: opacity must not disable color matching
+    # or change feathering thresholds, and zero-alpha pixels remain untouched.
+    if strength < 1:
+        blended = roi*(1-strength)+blended*strength
     output[y:y+h, x:x+w] = np.rint(blended).astype(np.uint8)
     return output

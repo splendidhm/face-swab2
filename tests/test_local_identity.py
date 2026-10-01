@@ -114,6 +114,19 @@ class IdentityTests(unittest.TestCase):
                       settings=CompositeSettings(identity=.55))
         np.testing.assert_array_equal(a, b)
 
+    def test_opacity_mixes_mesh_and_moved_interiors_with_original(self):
+        source = self.asset.points.copy()
+        source[LEFT_EYE, 0] -= 4
+        source[RIGHT_EYE, 0] += 4
+        asset = FaceAsset(self.asset.image, self.asset.alpha, source, self.asset.triangles, self.asset.path)
+        frame = self.asset.image.copy()
+        settings = CompositeSettings.preset('strong')
+        full = composite(frame,asset,self.target,settings=settings)
+        for strength in (.25,.5,.75):
+            result = composite(frame,asset,self.target,settings=settings,strength=strength)
+            expected = np.rint(frame.astype(float)*(1-strength)+full.astype(float)*strength)
+            np.testing.assert_allclose(result,expected,atol=1)
+
     def test_moved_apertures_cannot_paint_over_target_hair(self):
         class HairSegmenter:
             def segment(self, image):

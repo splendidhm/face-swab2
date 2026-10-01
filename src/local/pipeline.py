@@ -12,12 +12,15 @@ from .media import Cancelled, export_mp4, video_info, write_json
 from .tracking import SelectedTracker
 from .expression import BlendState
 from .identity import CompositeSettings, IdentityState
+from .masking import MaskStrengthControl
 
 
 def render_video(video, asset, selections, destination, landmarker, progress=lambda *args: None,
-                 cancel=None, force_region=False, settings=None):
+                 cancel=None, force_region=False, settings=None, mask_control=None):
     """Selection keyframes restart tracking; earlier and lost frames remain original."""
     settings = settings or CompositeSettings()
+    mask_control = mask_control if mask_control is not None else MaskStrengthControl()
+    mask_events = []
     video, destination = Path(video).resolve(), Path(destination).resolve()
     if video == destination or destination == asset.path.resolve():
         raise ValueError('입력 파일을 출력으로 덮어쓸 수 없습니다.')
@@ -54,6 +57,10 @@ def render_video(video, asset, selections, destination, landmarker, progress=lam
                 ok, frame = cap.read()
                 if not ok:
                     break
+                mask_level, mask_strength = mask_control.snapshot()
+                if not mask_events or mask_events[-1]['level'] != mask_level:
+                    mask_events.append({'frame': index, 'seconds': index/info['fps'],
+                                        'level': mask_level, 'strength': mask_strength})
                 if index in selections:
                     tracker = SelectedTracker(frame, selections[index], landmarker, force_region)
                     blend_state = BlendState()
@@ -66,7 +73,7 @@ def render_video(video, asset, selections, destination, landmarker, progress=lam
                 if state is not None:
                     frame = composite(frame, asset, state['points'], state['box'],
                                       landmarker=landmarker, blend_state=blend_state,
-                                      settings=settings, identity_state=identity_state)
+                                      settings=settings, identity_state=identity_state, strength=mask_strength)
                     replaced += 1
                     mode_frames[state['mode']] += 1
                 elif tracker is not None:
@@ -104,6 +111,7 @@ def render_video(video, asset, selections, destination, landmarker, progress=lam
                   'expression_interiors': 'driving_eyes_and_inner_mouth' if mode_frames['mesh'] else None,
                   'intermediate_codec': 'ffv1',
                   'composite_settings': asdict(settings),
+                  'masking_strength_events': mask_events,
                   'identity_geometry_frames': sum(len(s.applied_strengths) for s in identity_states),
                   'identity_reduced_frames': sum(s.reduced_frames for s in identity_states),
                   'identity_reduction_steps': sum(s.reduction_steps for s in identity_states),

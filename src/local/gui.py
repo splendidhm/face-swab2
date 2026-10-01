@@ -16,6 +16,7 @@ from .media import Cancelled, ROOT, WORKSPACE, normalize_video, read_frame
 from .pipeline import render_video
 from .tracking import SelectedTracker
 from .identity import CompositeSettings
+from .masking import MASK_LEVELS, MASK_STRENGTHS, MaskStrengthControl
 
 
 class FaceSwapGUI:
@@ -25,7 +26,7 @@ class FaceSwapGUI:
         self.root = root
         root.title('FaceSwab2 · 선택한 얼굴 합성')
         root.geometry('1160x900')
-        root.minsize(1120, 860)
+        root.minsize(1150, 890)
         self.events = queue.Queue()
         self.cancel = threading.Event()
         self.busy = False
@@ -37,6 +38,13 @@ class FaceSwapGUI:
         self.rect = None
         self.controls = []
         self.force_region = tk.BooleanVar(value=False)
+        self.mask_control = MaskStrengthControl()
+        self.mask_level = tk.IntVar(value=3)
+        self.mask_label = tk.StringVar(value='very strong · 교체 얼굴 100%')
+        self.mask_hint = tk.StringVar(value='낮을수록 원본 얼굴이 더 많이 보입니다.')
+        self.rendering = False
+        self._mask_preview_job = None
+        self._mask_preview_pending = False
         self.preset_name = tk.StringVar(value='균형')
         self.setting_vars = {name: tk.DoubleVar(value=value) for name, value in
                              vars(CompositeSettings.preset('balanced')).items()}
@@ -47,7 +55,7 @@ class FaceSwapGUI:
         self.selection_label = tk.StringVar(value='선택 시점 없음')
         self._build()
         root.protocol('WM_DELETE_WINDOW', self.close)
-        root.after(80, self.poll)
+        self._poll_job = root.after(80, self.poll)
 
     def button(self, parent, text, command):
         button = ttk.Button(parent, text=text, command=command)
@@ -100,6 +108,23 @@ class FaceSwapGUI:
         self.button(right, '선택 시점 미리보기', self.refresh_preview).pack(fill='x', pady=3)
         self.button(right, '현재 시점 선택 지우기', self.clear_selection).pack(fill='x', pady=3)
         self.button(right, '모든 선택 지우기', self.clear_all).pack(fill='x', pady=3)
+        mask_panel = ttk.LabelFrame(right, text='마스킹 강도', padding=6)
+        mask_panel.pack(fill='x', pady=(12, 0))
+        ttk.Label(mask_panel, textvariable=self.mask_label, font=('맑은 고딕', 10, 'bold')).pack(anchor='w')
+        self.mask_scale = tk.Scale(mask_panel, from_=0, to=3, resolution=1, orient='horizontal',
+                                   variable=self.mask_level, showvalue=False, length=210,
+                                   highlightthickness=0, command=self.mask_changed)
+        self.mask_scale.pack(fill='x')
+        self.mask_scale.bind('<MouseWheel>', self.mask_wheel)
+        levels = ttk.Frame(mask_panel)
+        levels.pack(fill='x')
+        self.mask_controls = [self.mask_scale]
+        for index, name in enumerate(MASK_LEVELS):
+            button = ttk.Radiobutton(levels, text=name, variable=self.mask_level, value=index,
+                                     command=self.mask_changed)
+            button.grid(row=0, column=index, sticky='w')
+            self.mask_controls.append(button)
+        ttk.Label(mask_panel, textvariable=self.mask_hint, wraplength=220).pack(anchor='w', pady=(6, 0))
         tuning = ttk.LabelFrame(left, text='교체 얼굴 특징 · 값을 바꾼 뒤 선택 시점 미리보기', padding=6)
         tuning.pack(fill='x', pady=(8, 0))
         self.preset_combo = ttk.Combobox(tuning, textvariable=self.preset_name,
@@ -136,8 +161,49 @@ class FaceSwapGUI:
             control.configure(state='disabled' if value else 'normal')
         self.cancel_button.configure(state='normal' if value else 'disabled')
         if not value:
+            self.rendering = False
+            self.set_mask_enabled(True)
+            _, strength = self.mask_control.snapshot()
+            percent = round(strength*100)
+            self.mask_hint.set(f'얼굴 영역: 원본 {100-percent}% + 교체 결과 {percent}%')
             self.preset_combo.configure(state='readonly')
             self.setting_controls['identity'].configure(state='disabled' if self.force_region.get() else 'normal')
+
+    def set_mask_enabled(self, enabled):
+        for control in self.mask_controls:
+            control.configure(state='normal' if enabled else 'disabled')
+
+    def mask_changed(self, value=None):
+        level = self.mask_level.get()
+        self.mask_control.set_level(level)
+        percent = round(MASK_STRENGTHS[level]*100)
+        self.mask_label.set(f'{MASK_LEVELS[level]} · 교체 얼굴 {percent}%')
+        if self._mask_preview_job is not None:
+            self.root.after_cancel(self._mask_preview_job)
+            self._mask_preview_job = None
+        if self.rendering:
+            self.mask_hint.set('다음 처리 프레임부터 적용됩니다. 이전 프레임은 유지됩니다.')
+            return
+        self.mask_hint.set(f'얼굴 영역: 원본 {100-percent}% + 교체 결과 {percent}%')
+        self._mask_preview_pending = True
+        self._mask_preview_job = self.root.after(250, self.mask_preview)
+
+    def mask_wheel(self, event):
+        if str(self.mask_scale['state']) == 'disabled' or not event.delta:
+            return 'break'
+        self.mask_level.set(max(0, min(3, self.mask_level.get()+(1 if event.delta > 0 else -1))))
+        self.mask_changed()
+        return 'break'
+
+    def mask_preview(self):
+        self._mask_preview_job = None
+        if self.closing or not self._mask_preview_pending:
+            return
+        if self.busy:
+            self._mask_preview_job = self.root.after(250, self.mask_preview)
+            return
+        self._mask_preview_pending = False
+        self.refresh_preview()
 
     def composite_settings(self):
         return CompositeSettings(**{name: value.get() for name, value in self.setting_vars.items()})
@@ -173,6 +239,9 @@ class FaceSwapGUI:
                 if event[0] == 'progress':
                     self.progress['value'] = event[1]*100
                     self.status.set(event[2])
+                    if self.rendering and event[1] >= .92:
+                        self.set_mask_enabled(False)
+                        self.mask_hint.set('프레임 합성 완료 · 인코딩 중에는 강도를 바꿀 수 없습니다.')
                 elif event[0] == 'done':
                     self.set_busy(False)
                     if not self.closing:
@@ -187,7 +256,7 @@ class FaceSwapGUI:
         if self.closing and not self.busy:
             self.root.destroy()
         else:
-            self.root.after(80, self.poll)
+            self._poll_job = self.root.after(80, self.poll)
 
     def load_video(self):
         filename = filedialog.askopenfilename(title='합성할 영상', filetypes=[('영상', '*.mp4 *.mov *.mkv *.avi *.webm'), ('모든 파일', '*.*')])
@@ -353,6 +422,7 @@ class FaceSwapGUI:
             self.status.set('선택 완료. 얼굴 이미지를 가져온 뒤 미리보기를 눌러주세요.')
             return
         frame, box, asset, force = self.frame.copy(), self.selections[self.index], self.asset, self.force_region.get()
+        _, mask_strength = self.mask_control.snapshot()
         try:
             settings = self.composite_settings()
         except (ValueError, tk.TclError) as error:
@@ -362,7 +432,8 @@ class FaceSwapGUI:
             model = Landmarker()
             try:
                 tracker = SelectedTracker(frame, box, model, force)
-                return composite(frame, asset, tracker.points, tracker.box, landmarker=model, settings=settings), tracker.mode
+                return composite(frame, asset, tracker.points, tracker.box, landmarker=model,
+                                 settings=settings, strength=mask_strength), tracker.mode
             finally:
                 model.close()
         def done(result):
@@ -394,7 +465,8 @@ class FaceSwapGUI:
             model = Landmarker()
             try:
                 return render_video(video, asset, selections, destination, model,
-                                    lambda p, s: self.events.put(('progress', p, s)), self.cancel, force, settings=settings)
+                                    lambda p, s: self.events.put(('progress', p, s)), self.cancel, force,
+                                    settings=settings, mask_control=self.mask_control)
             finally:
                 model.close()
         def done(report):
@@ -407,15 +479,27 @@ class FaceSwapGUI:
                 detail += '\n영역 추적 구간에는 표정 변형이 적용되지 않았습니다.'
             if skipped:
                 detail += f'\n추적을 잃은 {skipped}프레임은 원본입니다. 해당 구간에 선택 시점을 추가하여 다시 합성하세요.'
+            mask_events = report.get('masking_strength_events', [])
+            if len(mask_events) > 1:
+                detail += f'\n마스킹 강도 {len(mask_events)-1}회 변경 · 적용 프레임은 결과 보고서에 기록했습니다.'
             messagebox.showinfo('합성 완료', detail)
+        self.rendering = True
+        self._mask_preview_pending = False
+        self.mask_hint.set('렌더링 중 조절하면 다음 처리 프레임부터 적용됩니다.')
         self.submit(work, done, '선택한 얼굴 추적 및 합성을 시작합니다…')
 
     def close(self):
+        self._mask_preview_pending = False
+        if self._mask_preview_job is not None:
+            self.root.after_cancel(self._mask_preview_job)
+            self._mask_preview_job = None
         if self.busy:
             self.closing = True
+            self.set_mask_enabled(False)
             self.cancel.set()
             self.status.set('작업을 정리한 뒤 종료합니다…')
         else:
+            self.root.after_cancel(self._poll_job)
             self.root.destroy()
 
 

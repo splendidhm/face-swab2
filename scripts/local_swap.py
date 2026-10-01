@@ -13,6 +13,7 @@ from src.local.faces import Landmarker, extract_face
 from src.local.media import WORKSPACE, normalize_video
 from src.local.pipeline import render_video
 from src.local.identity import CompositeSettings
+from src.local.masking import MASK_LEVELS, MaskStrengthControl
 
 
 def main():
@@ -26,6 +27,7 @@ def main():
     parser.add_argument('--start-frame', type=int, default=0)
     parser.add_argument('--region-mode', action='store_true')
     parser.add_argument('--preset', choices=('legacy', 'balanced', 'strong'), default='balanced')
+    parser.add_argument('--mask-level', choices=MASK_LEVELS, default='very strong', help='Mask opacity: low/midium/strong/very strong')
     for name in ('identity', 'lighting', 'skin-color', 'detail'):
         parser.add_argument('--'+name, type=float, help='Override preset coefficient (identity: 0-0.65; others: 0-1)')
     args = parser.parse_args()
@@ -51,7 +53,8 @@ def main():
             asset = extract_face(args.face, temp/'cutout.png', model)
             report = render_video(video, asset, selections, args.out, model,
                                   lambda p, message: print(f'{p:.0%} {message}', flush=True),
-                                  force_region=args.region_mode, settings=settings)
+                                  force_region=args.region_mode, settings=settings,
+                                  mask_control=MaskStrengthControl(MASK_LEVELS.index(args.mask_level)))
             print(json.dumps(report, ensure_ascii=False, indent=2))
         finally:
             model.close()

@@ -8,7 +8,7 @@
 
 - 원격 저장소: https://github.com/splendidhm/face-swab2.git
 - 프로젝트 폴더: `C:\Users\케이지에프앤비\codex\projects\faceswab2`
-- 현재 작업 브랜치: `feature/natural-face-expression`. 안정 브랜치: `main`.
+- 현재 작업 브랜치: `feature/masking-strength-slider` (`feature/natural-face-expression`의 `00e9fcf7`에서 분기). 안정 브랜치: `main`.
 - 작업 시작 기준 HEAD: `33ed48659a4a04d1f7c159ddb99a9610f1886f3f`
 - 기준 커밋: 2025-09-22, `Initial commint : first`
 - 안정 기준 버전: **`v0.1.0`**, `main`에 반영하는 첫 로컬 얼굴 합성 리팩토링.
@@ -394,3 +394,16 @@ git switch -c feature/<작업명>
 .venv\Scripts\python.exe scripts/compare_identity.py --video outputs/youtube_quality_20261001/source_10s.mp4 --face workspace/test-assets/astronaut.png --selections outputs/youtube_quality_20261001/selections.json --out-dir outputs/identity_quality_20261001
 .venv\Scripts\python.exe scripts/check_identity_quality.py --source outputs/youtube_quality_20261001/source_10s.mp4 --folder outputs/identity_quality_20261001 --roi 450 100 380 400
 ```
+
+## 17. GUI 마스킹 강도 4단계 (2026-10-01)
+
+- `00e9fcf7`에서 **`feature/masking-strength-slider`**를 새로 생성했다. 기존 기능 브랜치와 안정 `main`을 보존한다.
+- 오른쪽 패널에 정수 0–3 단위의 가로 슬라이더 및 단계별 버튼을 추가했다. 마우스 드래그, 휠, 버튼 클릭을 지원한다. 단계 이름은 사용자 요청 그대로 `low`, `midium`, `strong`, `very strong`이다.
+- 강도는 각각 0.25/0.50/0.75/1.0. 기본 1.0은 기존 합성과 동일하다. `CompositeSettings.identity`의 얼굴 비율과 독립적이다. 조명/매트/눈·입 이동이 끝난 합성 결과를 원본과 혼합하므로 낮은 강도에서 색상 보정이 꺼지거나 경계 임계값이 바뀌지 않는다.
+- `src/local/masking.py`에 단계 상수와 잠금으로 보호되는 `MaskStrengthControl` 추가. `render_video(..., mask_control=...)`가 매 프레임 시작에 `snapshot()`을 읽고 `composite(..., strength=...)`에 전달한다. worker는 Tk 변수를 읽지 않는다. 설정 생략은 기존 100% 동작이다.
+- GUI 강도 변경은 250ms debounce 후 선택 시점 미리보기를 갱신한다. 처리 중 변경하면 완료 후 최신 값으로 다시 갱신한다. 렌더 중에는 다음 처리 프레임부터 변경하며 과거 프레임을 재처리하지 않는다. 최종 인코딩 중에는 강도 조작을 잠그고 완료/실패 시 복구한다.
+- 결과 JSON `masking_strength_events`: 단계가 실제로 바뀐 프레임의 `{frame, seconds, level, strength}` 목록. 첫 프레임 설정도 기록한다. 추적 상실 구간에서는 설정만 기록되고 원본 유지 동작은 그대로다.
+- CLI `--mask-level {low,midium,strong,"very strong"}` 추가. 기본 very strong. 기존 얼굴 특징 프리셋 변경은 마스킹 강도를 초기화하지 않는다.
+- Tk 종료 시 미리보기/이벤트 폴링 예약을 정리한다. GUI 기본 1160×900, 최소 1150×890. 숨긴 Tk 검사에서 요청 크기 1143×881로 오른쪽 패널이 기본 창 안에 들어가는 것을 확인했다.
+- 전체 회귀 테스트 **44개 통과, skip 없음, 29.488초**. 단계 유효성, 단조로운 혼합 변화, 배경 보존, 정밀 메시/이동 눈·입안 혼합, 미리보기/저장 설정 일치, debounce, busy 중 조작, 실제 렌더 중 단계 변경과 보고서 기록을 포함한다.
+- 이전 YouTube 테스트 첫 프레임으로 네 단계 비교 이미지 `outputs/masking_strength_20261001/levels.jpg`를 생성하고 확인했다. 강도 변화의 시각적 점검이며 기존 이마 경계나 정적 미소 문제를 해결했다는 검증은 아니다. 모델/패키지 추가 없음.
