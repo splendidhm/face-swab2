@@ -1,6 +1,6 @@
 # FaceSwab2 작업 인수인계
 
-최종 기록일: 2026-09-30 (Asia/Seoul)
+최종 기록일: 2026-10-01 (Asia/Seoul)
 
 이 문서는 다른 작업환경의 개발자/에이전트가 현재 구현을 이어가기 위한 기록이다. 작업을 시작할 때 이 문서와 `README.md`, `LOCAL_GUIDE.ko.md`를 먼저 읽는다. 파일명은 사용자 요청에 따라 **AGENT.md**이다. 도구가 `AGENTS.md`만 자동 탐색하는 경우에는 이 파일을 명시적으로 열어야 한다.
 
@@ -8,12 +8,12 @@
 
 - 원격 저장소: https://github.com/splendidhm/face-swab2.git
 - 프로젝트 폴더: `C:\Users\케이지에프앤비\codex\projects\faceswab2`
-- 브랜치: `main`
+- 현재 작업 브랜치: `feature/natural-face-expression`. 안정 브랜치: `main`.
 - 작업 시작 기준 HEAD: `33ed48659a4a04d1f7c159ddb99a9610f1886f3f`
 - 기준 커밋: 2025-09-22, `Initial commint : first`
 - 안정 기준 버전: **`v0.1.0`**, `main`에 반영하는 첫 로컬 얼굴 합성 리팩토링.
 - 사용자는 현재 작업을 안정 기준으로 보존하고 이후 업데이트/버그 수정은 별도 브랜치에서 관리하도록 지시했다.
-- 이번 안정 기준 반영은 기존 작업이 이미 `main` 위에 있어 직접 커밋한다. 이후 작업에는 아래 브랜치 규칙을 적용한다.
+- `v0.1.0` 안정 기준은 `3240b286fbf346fa07a105bf36d30d5b97ad173c`이며 원격 반영 완료. 업데이트 1은 별도 기능 브랜치의 작업이며 상세는 14절을 따른다.
 
 ### 다른 환경으로 전달할 때
 
@@ -68,7 +68,9 @@ git show v0.1.0 --stat
 | `face_swap_gui.py` | 새 GUI 진입점. `FaceSwapGUI`, `main`을 가져옴 |
 | `face-swab2.py` | 비어 있던 파일을 새 GUI 진입점으로 연결 |
 | `src/local/gui.py` | 입력 선택, 영상 탐색, 드래그, 미리보기, worker 큐, 저장 UI |
-| `src/local/faces.py` | Tasks 모델 래퍼, 정면 판정, 누끼 추출, Delaunay 변형, 알파 합성 |
+| `src/local/faces.py` | Tasks 모델 래퍼, 정면 판정, 누끼 추출, 고정 메시 변형과 합성 연결 |
+| `src/local/matting.py` | 업데이트 1: 얼굴/헤어 분할, 곡선 윤곽, guided filter, 안쪽 페더링 |
+| `src/local/expression.py` | 업데이트 1: 468점/852삼각형 고정 메시, 표정 필터, 눈/입안 보존, LAB/다중 해상도 합성 |
 | `src/local/tracking.py` | 선택 ROI의 CSRT 추적, 지역 얼굴 재검출, optical flow, 추적 상실 판단 |
 | `src/local/media.py` | 경로 기준, 영상 정보/프레임 읽기, FFmpeg 실행/취소, 720p 변환, 오디오 결합 |
 | `src/local/pipeline.py` | 선택 시점별 추적 및 프레임 합성, 임시파일 처리, 결과 검증과 보고서 |
@@ -102,7 +104,7 @@ render_video → 선택 지점에서 SelectedTracker 초기화
 
 주요 인터페이스:
 
-- `FaceAsset`: BGR 이미지, uint8 알파, 랜드마크 좌표, Delaunay 삼각형 인덱스, PNG 경로.
+- `FaceAsset`: BGR 이미지, uint8 알파, 랜드마크 좌표, 고정 얼굴 메시 삼각형 인덱스, PNG 경로.
 - `selections`: Python에서는 `{프레임번호(int): [x, y, width, height]}`. JSON 저장 시 키는 문자열이 되므로 CLI에서 정수로 변환한다.
 - 좌표는 **원본 파일 해상도가 아니라 정규화한 1280×720 영상 기준**이다.
 - 프레임 번호는 0부터 시작하고 정규화한 30fps 기준이다.
@@ -144,7 +146,7 @@ render_video → 선택 지점에서 SelectedTracker 초기화
 | opencv-contrib-python | 4.11.0.86 | CSRT, optical flow, 프레임 입출력, 변형·합성 |
 | NumPy | 2.2.6 | 이미지·마스크·좌표 배열 연산 |
 | Pillow | 11.3.0 | JPEG/PNG 읽기, EXIF 회전, RGBA 저장, Tk 이미지 |
-| SciPy | 1.15.3 | Delaunay 삼각분할 |
+| SciPy | 1.15.3 | 곡선 윤곽 보간(CubicSpline). 이전 버전은 Delaunay 사용 |
 | imageio-ffmpeg | 0.6.0 | 배포에 포함된 FFmpeg 실행파일 경로 |
 | FFmpeg | Windows 번들 7.1 | 영상 정규화, H.264/AAC 인코딩, 오디오 처리 |
 
@@ -251,12 +253,12 @@ curl.exe -fL "https://raw.githubusercontent.com/scikit-image/scikit-image/v0.19.
 - 실제 사용자가 준비한 얼굴 이미지/캐릭터 영상으로 품질 평가하지 않았다. 공개 astronaut 이미지 기반 짧은 이동 영상과 간단한 그림을 사용했다.
 - GUI는 코드 수준 통합 테스트를 수행했다. 수동 시각/사용성 검증, 다양한 Windows 배율/화면 크기 검증은 미완료다.
 - 정면 판정은 눈/코 상대 위치의 휴리스틱이다. 정확한 3D pose 추정이 아니다.
-- 누끼는 얼굴 윤곽 마스크다. 머리카락까지 포함하는 의미론적 인물 분할이 아니다.
+- 업데이트 1은 얼굴/헤어 분할을 추가했다. 다만 머리카락에 가려진 피부를 생성하거나 모든 가림을 복구하지는 않는다.
 - 영역 모드는 얼굴을 선택 사각형에 맞춰 리사이즈한다. 고개 회전/표정 전이 기능이 없다.
 - identity embedding 기반 추적이 없어서 유사 얼굴의 교차·긴 가림에서 인물 신원 유지가 보장되지 않는다.
 - 손/물체 가림 분할, 생성형 얼굴 복원, 립싱크, 전신 추적은 없다.
 - 첫 선택 이전의 역방향 추적, 여러 얼굴 동시 교체는 없다.
-- 첫 입력 정규화와 임시 영상(mp4v)을 거쳐 최종 H.264를 만들기 때문에 반복 인코딩에 따른 품질 손실 가능성이 있다.
+- 업데이트 1의 중간 영상은 FFV1 무손실이다. 입력 정규화 및 최종 H.264 단계의 손실 압축은 유지된다.
 - 긴 영상의 성능/최대 메모리/디스크 사용량, 고해상도 원본의 대규모 처리 벤치마크는 미실시다.
 - Intel GPU 가속은 구현하지 않았으며 CPU로 동작한다.
 - `workspace/`에 준비 영상/얼굴 캐시가 남는다. 자동 용량 관리 UI는 없다.
@@ -264,11 +266,11 @@ curl.exe -fL "https://raw.githubusercontent.com/scikit-image/scikit-image/v0.19.
 
 ## 11. 다음 작업의 권장 순서
 
-1. 새 환경에서 설치와 15개 회귀 테스트를 재현한다.
+1. 새 환경에서 두 모델 설치와 25개 회귀 테스트를 재현한다.
 2. 실제 사용자의 짧은 샘플 영상과 얼굴로 결과를 확인하고, 추적 실패 프레임/왜곡/가림을 구체적으로 수집한다.
 3. GUI의 실제 드래그·프레임 이동·미리보기·취소·저장 흐름을 수동 확인한다.
 4. 요구 품질에 따라 회전 추정/가림 마스크/신원 추적 또는 생성형 교체 엔진을 검토한다. 현재 누끼 방식과 별개인 작업임을 명확히 한다.
-5. 인코딩 단계 단순화 또는 무손실 중간 코덱, 긴 영상 성능, 캐시 관리 개선을 검토한다.
+5. FFV1 임시 파일의 디스크 사용량, 긴 영상 성능, 캐시 관리 개선을 검토한다.
 6. 필요 시 Intel 가속을 도입하고 동일 입력에서 CPU와 품질·속도를 비교한다.
 7. 아래 브랜치 규칙에 따라 변경을 전달한다. 기존 추적 산출물 정리는 별도 변경으로 검토한다.
 
@@ -310,3 +312,39 @@ git switch -c feature/<작업명>
 ```
 
 작업 시작 전 미커밋 변경이 있다면 덮어쓰거나 임의로 reset하지 말고 해당 변경을 보존한다.
+
+## 14. 업데이트 1 — 누끼 경계와 정밀 표정 (2026-10-01)
+
+작업 브랜치 `feature/natural-face-expression`에서 진행한다. 안정 `main`과 `v0.1.0`을 덮어쓰지 않는다. 9절의 15개 테스트 기록은 안정 버전의 기록이며 업데이트 1의 테스트는 총 25개다.
+
+### 구현 변경
+
+- Source 누끼: 얼굴/헤어/피부/배경/의상/액세서리의 확률 지도와 얼굴 곡선 윤곽을 결합. guided filter와 안쪽 distance feather로 머리카락·배경 색이 경계 바깥으로 번지는 것을 줄임. 원본 알파 유지.
+- `FaceAsset.triangles`는 더 이상 일부 기준점에 대한 Delaunay 인덱스가 아니다. MediaPipe 공식 해부학적 topology의 852개 삼각형이며 0~467번 랜드마크를 직접 참조한다. 반전·퇴화 삼각형은 건너뛴다.
+- 매 프레임 눈꺼풀/입술/볼/턱/눈썹을 조밀한 메시로 변형. Optical flow에 맞춘 적응형 필터로 눈/입 변화의 지연을 줄이고 피부 흔들림을 완화한다. 10프레임마다 국소 얼굴 윤곽으로 CSRT 박스를 재보정한다.
+- 원본 영상의 동공/눈 내부와 입안(치아·혀)은 보존한다. 업로드 이미지의 주변 눈꺼풀/입술/피부는 변형한다. 이 부분은 생성형 표정 재현과 구별해야 한다.
+- Target 얼굴/헤어 분할로 헤어/비얼굴 영역을 보호하고, LAB 조명·피부색 보정, 시간적 색상 shift 필터 및 multiband blending을 적용한다.
+- 작업 중간 코덱은 MKV/FFV1. 최종 출력은 기존 720p/30fps H.264/AAC 스테레오 계약 유지.
+- 보고서: `compositor`, `mesh_vertices`, `mesh_triangles`, `source_hair_segmentation`, `target_hair_segmentation`, `mode_frames`, `expression_interiors`, `intermediate_codec` 추가. 영역 모드에서는 표정 처리를 수행했다고 기록하지 않는다.
+- GUI 미리보기와 실제 렌더는 동일한 `composite(..., landmarker=...)` 경로를 사용한다. 렌더는 선택 지점별 `BlendState`로 색상 안정화 상태를 초기화한다.
+
+### 추가 모델과 환경
+
+새 Python 패키지는 추가하지 않았다. 기존 lock을 유지한다. 추가 모델은 `models/selfie_multiclass_256x256.tflite`:
+
+- URL: https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/1/selfie_multiclass_256x256.tflite
+- SHA256: `c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0`
+- 공식 클래스 순서: background, hair, body-skin, face-skin, clothes, others.
+- `scripts/setup_local.py`가 두 모델을 다운로드·해시 검사하고 실제 로딩한다. 새 환경에서 `setup_local.bat` 실행.
+- 근거: https://developers.google.com/edge/mediapipe/solutions/vision/image_segmenter
+
+### 확인 방법 및 남은 한계
+
+- 2026-10-01 최종 `test_local_*.py` 25개 모두 통과(skip 없음, 11.320초). 두 모델 해시/로딩과 `pip check`, 새 모듈 구문 검사도 통과했다. 확대 비교 PNG를 확인했다.
+
+- `tests/test_local_expression.py`의 10개 테스트 추가: 헤어 제거, 안쪽 페더, 투명도 유지, 색상 안정성, 고정 메시, 깜빡임 반응, 원본 눈/입안 보존, 입술/볼 변형, 닫힌 눈의 수치 안정성 등.
+- 기존 테스트는 두 모델이 있어야 실행된다. skip을 통과로 기록하지 않는다.
+- `scripts/preview_expression.py`는 공개 astronaut와 matplotlib의 grace_hopper 사진으로 비교 PNG를 생성한다. `workspace/expression-review/`에 누끼, 비교 이미지, 실행 정보가 남는다.
+- 실제 사용자 영상과 단일 사진에서의 모든 3D 근육/가림/극단적 측면 재현은 검증되지 않았다. 합성된 표정 테스트는 실제 근육 움직임 영상의 대체물이 아니다.
+- 영역 모드는 여전히 표정 전이를 하지 않는다. 완료 창에 정밀/영역 프레임 수를 각각 표시한다.
+- 매 프레임 분할과 852개 삼각형 연산으로 CPU 처리 시간이 늘어난다. 실시간 처리 성능을 보장하지 않는다.

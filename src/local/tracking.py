@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 
 from .faces import OVAL, bbox, clip_box, iou
+from .expression import stabilize_landmarks
 
 
 def face_in_region(frame, box, landmarker):
@@ -38,6 +39,7 @@ class SelectedTracker:
         self.global_hist = self.global_histogram(frame)
         self.lost = False
         self.mesh_missing = 0
+        self.frame_count = 0
 
     @staticmethod
     def histogram(frame, box):
@@ -58,6 +60,7 @@ class SelectedTracker:
             self.lost = True
             return None
         self.global_hist = current_hist
+        self.frame_count += 1
         success, new_box = self.tracker.update(frame)
         if not success:
             self.lost = True
@@ -100,7 +103,12 @@ class SelectedTracker:
                 self.lost = True
                 return None
             self.mesh_missing = 0
-            self.points = detected*.8 + predicted*.2
+            self.points = stabilize_landmarks(detected, predicted)
+            if self.frame_count % 10 == 0:
+                # Correct long-term box drift from reliable local face geometry.
+                new_box = np.array(clip_box(bbox(self.points[OVAL]), frame.shape), np.float32)
+                self.tracker = cv2.TrackerCSRT_create()
+                self.tracker.init(frame, tuple(map(int, new_box)))
         self.gray, self.box = gray, new_box
         return {'points': self.points, 'box': self.box, 'mode': self.mode}
 

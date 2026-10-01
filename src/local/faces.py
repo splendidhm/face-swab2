@@ -7,20 +7,15 @@ import cv2
 import mediapipe as mp
 import numpy as np
 from PIL import Image, ImageOps
-from scipy.spatial import Delaunay
-
 from .media import ROOT
+from .matting import FaceSegmenter, face_matte, contour_mask, inward_feather
+from .expression import anatomical_triangles, aperture_mask, dense_warp, match_lighting, multiband_blend
 
 MODEL = ROOT / 'models' / 'face_landmarker.task'
-# MediaPipe face oval. This excludes hair, neck, and background.
+# Anatomical face boundary; semantic segmentation separately removes hair.
 OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397,
         365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58,
         132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
-FEATURES = [33, 133, 160, 159, 158, 144, 145, 153, 362, 263, 385, 386,
-            387, 380, 374, 373, 70, 63, 105, 66, 107, 336, 296, 334, 293,
-            300, 1, 4, 6, 168, 2, 98, 327, 61, 291, 0, 17, 13, 14, 78,
-            308, 37, 267, 84, 314, 205, 425, 50, 280, 187, 411, 199]
-KEYS = np.array(sorted(set(OVAL + FEATURES)))
 
 
 class Landmarker:
@@ -33,6 +28,7 @@ class Landmarker:
             num_faces=max_faces, min_face_detection_confidence=0.45,
             min_face_presence_confidence=0.45)
         self.task = mp.tasks.vision.FaceLandmarker.create_from_options(options)
+        self.segmenter = None
 
     def detect(self, bgr):
         h, w = bgr.shape[:2]
@@ -43,6 +39,13 @@ class Landmarker:
 
     def close(self):
         self.task.close()
+        if self.segmenter is not None:
+            self.segmenter.close()
+
+    def segment(self, bgr):
+        if self.segmenter is None:
+            self.segmenter = FaceSegmenter()
+        return self.segmenter.probabilities(bgr)
 
 
 def bbox(points):
@@ -90,6 +93,13 @@ class FaceAsset:
     path: Path
 
 
+def semantic_for_box(frame, box, landmarker):
+    x, y, w, h = box
+    bx, by, bw, bh = clip_box((x-w*.5, y-h*.5, w*2, h*2), frame.shape)
+    probabilities = landmarker.segment(frame[by:by+bh, bx:bx+bw])
+    return probabilities[y-by:y-by+h, x-bx:x-bx+w]
+
+
 def extract_face(path, output, landmarker):
     path, output = Path(path), Path(output)
     if path.suffix.lower() not in {'.jpg', '.jpeg', '.png'}:
@@ -107,12 +117,14 @@ def extract_face(path, output, landmarker):
     if len(faces) > 1:
         raise ValueError('정면 얼굴이 여러 개입니다. 사용할 사람 한 명만 있는 사진을 선택하세요.')
     points = faces[0]
-    x, y, w, h = clip_box(bbox(points[OVAL]), bgr.shape)
-    mask = np.zeros(bgr.shape[:2], np.uint8)
-    cv2.fillConvexPoly(mask, cv2.convexHull(points[OVAL].astype(np.int32)), 255)
-    mask = cv2.GaussianBlur(mask, (7, 7), 1.5)
-    mask = np.minimum(mask, rgba[..., 3])
-    crop, alpha = bgr[y:y+h, x:x+w], mask[y:y+h, x:x+w]
+    face_box = bbox(points[OVAL])
+    padding = max(3, min(face_box[2:])*.045)
+    x, y, w, h = clip_box((*(face_box[:2]-padding), *(face_box[2:]+2*padding)), bgr.shape)
+    crop = bgr[y:y+h, x:x+w]
+    probabilities = semantic_for_box(bgr, (x, y, w, h), landmarker)
+    alpha = face_matte(crop, points[OVAL]-[x, y], probabilities, rgba[y:y+h, x:x+w, 3])
+    if np.count_nonzero(alpha > 128) < w*h*.15:
+        raise ValueError('헤어를 제외한 얼굴 피부 영역이 충분하지 않습니다. 가림 없는 정면 사진을 선택하세요.')
     scale = min(1., 512/max(w, h))
     size = (max(1, round(w*scale)), max(1, round(h*scale)))
     crop, alpha = cv2.resize(crop, size), cv2.resize(alpha, size)
@@ -120,11 +132,12 @@ def extract_face(path, output, landmarker):
     points = points.astype(np.float32)
     output.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(np.dstack([cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), alpha])).save(output)
-    return FaceAsset(crop, alpha, points, Delaunay(points[KEYS]).simplices, output)
+    return FaceAsset(crop, alpha, points, anatomical_triangles(), output)
 
 
-def composite(frame, asset, target_points=None, target_box=None, strength=1.0):
-    """Warp only the local face ROI; all alpha/image coordinates stay aligned."""
+def composite(frame, asset, target_points=None, target_box=None, strength=1.0,
+              landmarker=None, blend_state=None):
+    """Dense expression mesh with semantic matting and preserved eye/mouth interiors."""
     box = bbox(target_points[OVAL]) if target_points is not None else target_box
     try:
         x, y, w, h = clip_box(box, frame.shape)
@@ -134,34 +147,21 @@ def composite(frame, asset, target_points=None, target_box=None, strength=1.0):
         warped = cv2.resize(asset.image, (w, h)).astype(np.float32)
         alpha = cv2.resize(asset.alpha, (w, h)).astype(np.float32)/255
     else:
-        source = asset.points[KEYS].astype(np.float32)
-        target = (target_points[KEYS] - [x, y]).astype(np.float32)
-        # Premultiplied alpha avoids dark borders around the cutout.
-        premult = np.dstack([asset.image.astype(np.float32) * (asset.alpha[..., None]/255),
-                            asset.alpha.astype(np.float32)/255])
-        merged = np.zeros((h, w, 4), np.float32)
-        for indices in asset.triangles:
-            src, dst = source[indices], target[indices]
-            bx, by, bw, bh = cv2.boundingRect(dst)
-            x1, y1, x2, y2 = max(0, bx), max(0, by), min(w, bx+bw), min(h, by+bh)
-            if x2 <= x1 or y2 <= y1:
-                continue
-            local = dst - [x1, y1]
-            transform = cv2.getAffineTransform(src, local.astype(np.float32))
-            piece = cv2.warpAffine(premult, transform, (x2-x1, y2-y1), flags=cv2.INTER_LINEAR)
-            triangle_mask = np.zeros((y2-y1, x2-x1), np.uint8)
-            cv2.fillConvexPoly(triangle_mask, np.rint(local).astype(np.int32), 255)
-            region = merged[y1:y2, x1:x2]
-            region[triangle_mask > 0] = piece[triangle_mask > 0]
-        alpha = np.clip(merged[..., 3], 0, 1)
-        warped = merged[..., :3] / np.maximum(alpha[..., None], 1e-5)
+        target = (target_points - [x, y]).astype(np.float32)
+        warped, alpha = dense_warp(asset, target, (h, w))
+        alpha *= inward_feather(contour_mask((h, w), target[OVAL]), max(1.5, w*.02))
+        if landmarker is not None:
+            probabilities = semantic_for_box(frame, (x, y, w, h), landmarker)
+            alpha *= face_matte(frame[y:y+h, x:x+w], target[OVAL], probabilities)/255
+        # Warp the uploaded lips/eyelids; retain the driving pupils, teeth and tongue.
+        openings = aperture_mask((h, w), target)
+        openings[openings > .999] = 1.
+        alpha *= 1-openings
     roi = frame[y:y+h, x:x+w].astype(np.float32)
-    interior = alpha > .8
-    if interior.sum() > 20:
-        # Restrained illumination correction preserves the uploaded face's color.
-        shift = roi[interior].mean(0) - warped[interior].mean(0)
-        warped = np.clip(warped + shift*.3, 0, 255)
-    a = np.clip(alpha * strength, 0, 1)[..., None]
+    alpha = np.clip(alpha*strength, 0, 1)
+    warped = match_lighting(warped, roi, alpha, blend_state)
+    # Extend colors into transparent pixels before pyramid filtering to avoid dark halos.
+    warped = np.where((alpha > .01)[..., None], warped, roi)
     output = frame.copy()
-    output[y:y+h, x:x+w] = np.clip(warped*a + roi*(1-a), 0, 255).astype(np.uint8)
+    output[y:y+h, x:x+w] = np.rint(multiband_blend(warped, roi, alpha)).astype(np.uint8)
     return output

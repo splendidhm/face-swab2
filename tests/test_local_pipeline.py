@@ -18,11 +18,12 @@ from src.local.faces import MODEL, ROOT, OVAL, Landmarker, bbox, composite, extr
 from src.local.media import Cancelled, ffmpeg, normalize_video, read_frame, run_ffmpeg, video_info
 from src.local.pipeline import render_video
 from src.local.tracking import SelectedTracker
+from src.local.matting import SEGMENT_MODEL
 
 FIXTURE = ROOT/'workspace'/'test-assets'/'astronaut.png'
 
 
-@unittest.skipUnless(MODEL.exists() and FIXTURE.exists(), 'Download model and astronaut fixture first')
+@unittest.skipUnless(MODEL.exists() and SEGMENT_MODEL.exists() and FIXTURE.exists(), 'Download both models and astronaut fixture first')
 class LocalPipelineTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -109,6 +110,8 @@ class LocalPipelineTests(unittest.TestCase):
         self.assertEqual(report['unchanged_before_selection'], 3)
         self.assertEqual(report['replaced_frames'], 15)
         self.assertEqual(report['skipped_tracking_ranges'], [])
+        self.assertEqual(report['mode_frames'], {'mesh': 15, 'region': 0})
+        self.assertTrue(report['target_hair_segmentation'])
         self.assertEqual(json.loads(output.with_suffix('.report.json').read_text(encoding='utf8'))['audio_channels'], 2)
         metadata = subprocess.run([ffmpeg(), '-hide_banner', '-i', str(output)], capture_output=True).stderr.decode('utf8', 'replace')
         self.assertIn('Video: h264', metadata)
@@ -124,7 +127,10 @@ class LocalPipelineTests(unittest.TestCase):
         normalized = self.folder/'mono-normalized.mp4'
         normalize_video(mono, normalized)
         output = self.folder/'stereo.mp4'
-        render_video(normalized, self.asset, {0: self.box}, output, self.model, force_region=True)
+        report = render_video(normalized, self.asset, {0: self.box}, output, self.model, force_region=True)
+        self.assertEqual(report['mode_frames'], {'mesh': 0, 'region': 18})
+        self.assertFalse(report['target_hair_segmentation'])
+        self.assertIsNone(report['expression_interiors'])
         audio = subprocess.run([ffmpeg(), '-v', 'error', '-i', str(output), '-vn', '-f', 'f32le', '-ac', '2', '-'], capture_output=True)
         self.assertEqual(audio.returncode, 0)
         samples = np.frombuffer(audio.stdout, np.float32).reshape(-1, 2)

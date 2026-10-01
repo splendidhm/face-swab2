@@ -9,6 +9,7 @@ import cv2
 from .faces import composite
 from .media import Cancelled, export_mp4, video_info, write_json
 from .tracking import SelectedTracker
+from .expression import BlendState
 
 
 def render_video(video, asset, selections, destination, landmarker, progress=lambda *args: None,
@@ -28,16 +29,18 @@ def render_video(video, asset, selections, destination, landmarker, progress=lam
     replaced = 0
     skipped = []
     modes = set()
+    mode_frames = {'mesh': 0, 'region': 0}
     with tempfile.TemporaryDirectory(prefix='faceswab-', dir=destination.parent) as temp:
         temp = Path(temp)
-        raw = temp / 'frames.mp4'
+        raw = temp / 'frames.mkv'
         final = temp / 'final.mp4'
         cap = cv2.VideoCapture(str(video))
-        writer = cv2.VideoWriter(str(raw), cv2.VideoWriter_fourcc(*'mp4v'), info['fps'], (1280, 720))
+        writer = cv2.VideoWriter(str(raw), cv2.VideoWriter_fourcc(*'FFV1'), info['fps'], (1280, 720))
         if not writer.isOpened():
             cap.release()
             raise RuntimeError('임시 영상 인코더를 열지 못했습니다.')
         tracker = None
+        blend_state = BlendState()
         index = 0
         try:
             while True:
@@ -48,13 +51,16 @@ def render_video(video, asset, selections, destination, landmarker, progress=lam
                     break
                 if index in selections:
                     tracker = SelectedTracker(frame, selections[index], landmarker, force_region)
+                    blend_state = BlendState()
                     state = tracker.current()
                     modes.add(tracker.mode)
                 else:
                     state = tracker.update(frame) if tracker else None
                 if state is not None:
-                    frame = composite(frame, asset, state['points'], state['box'])
+                    frame = composite(frame, asset, state['points'], state['box'],
+                                      landmarker=landmarker, blend_state=blend_state)
                     replaced += 1
+                    mode_frames[state['mode']] += 1
                 elif tracker is not None:
                     if skipped and skipped[-1][1] == index-1:
                         skipped[-1][1] = index
@@ -82,7 +88,13 @@ def render_video(video, asset, selections, destination, landmarker, progress=lam
                   'unchanged_before_selection': min(selections), 'skipped_tracking_ranges': skipped,
                   'modes': sorted(modes), 'selections': selections, 'fps': info['fps'],
                   'resolution': [1280, 720], 'video_codec': 'h264', 'audio_codec': 'aac',
-                  'audio_channels': 2, 'audio_sample_rate': 48000}
+                  'audio_channels': 2, 'audio_sample_rate': 48000,
+                  'compositor': 'dense-expression-v2', 'mesh_vertices': 468,
+                  'mesh_triangles': len(asset.triangles), 'source_hair_segmentation': True,
+                  'target_hair_segmentation': mode_frames['mesh'] > 0,
+                  'mode_frames': mode_frames,
+                  'expression_interiors': 'driving_eyes_and_inner_mouth' if mode_frames['mesh'] else None,
+                  'intermediate_codec': 'ffv1'}
         write_json(temp/'report.json', report)
         os.replace(final, destination)
         os.replace(temp/'report.json', destination.with_suffix('.report.json'))

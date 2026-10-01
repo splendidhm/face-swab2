@@ -89,10 +89,10 @@ class FaceSwapGUI:
         self.button(right, '투명 얼굴 PNG 저장', self.save_face).pack(fill='x', pady=(8, 18))
         ttk.Label(right, text='3. 영상의 얼굴을 드래그', font=('맑은 고딕', 11, 'bold')).pack(anchor='w')
         ttk.Label(right, textvariable=self.selection_label, wraplength=220).pack(anchor='w', pady=8)
-        check = ttk.Checkbutton(right, text='캐릭터 영역 모드', variable=self.force_region, command=self.refresh_preview)
+        check = ttk.Checkbutton(right, text='영역 모드 (표정 변형 없음)', variable=self.force_region, command=self.refresh_preview)
         check.pack(anchor='w')
         self.controls.append(check)
-        ttk.Label(right, text='사람형 얼굴: 윤곽에 맞춰 변형\n인식이 어려운 캐릭터: 선택 영역 추적', wraplength=220).pack(anchor='w', pady=6)
+        ttk.Label(right, text='정밀 모드: 눈꺼풀·입술·볼 움직임 반영\n얼굴 인식 실패 시 영역 추적으로 전환', wraplength=220).pack(anchor='w', pady=6)
         self.button(right, '선택 시점 미리보기', self.refresh_preview).pack(fill='x', pady=3)
         self.button(right, '현재 시점 선택 지우기', self.clear_selection).pack(fill='x', pady=3)
         self.button(right, '모든 선택 지우기', self.clear_all).pack(fill='x', pady=3)
@@ -189,7 +189,7 @@ class FaceSwapGUI:
                 model.close()
         def done(asset):
             self.asset = asset
-            self.face_label.set(Path(filename).name + '\n정면 얼굴 추출 완료')
+            self.face_label.set(Path(filename).name + '\n얼굴 윤곽 추출 · 헤어 분리 완료')
             self.show_cutout()
             self.status.set('배경·머리카락·목을 제외한 얼굴을 추출했습니다. 영상 속 얼굴을 선택하세요.')
             if self.frame is not None:
@@ -317,14 +317,14 @@ class FaceSwapGUI:
             model = Landmarker()
             try:
                 tracker = SelectedTracker(frame, box, model, force)
-                return composite(frame, asset, tracker.points, tracker.box), tracker.mode
+                return composite(frame, asset, tracker.points, tracker.box, landmarker=model), tracker.mode
             finally:
                 model.close()
         def done(result):
             frame, mode = result
             self.show_frame(frame, True)
-            self.status.set('윤곽 변형 모드 · 선택한 얼굴만 추적합니다.' if mode == 'mesh' else
-                            '영역 추적 모드 · 선택한 사각형에 얼굴을 맞춥니다. 표정·회전 변형은 제한됩니다.')
+            self.status.set('정밀 표정 모드 · 눈꺼풀·입술·볼 변형 / 영상의 눈동자·입안 보존 / 헤어 제외' if mode == 'mesh' else
+                            '영역 추적 모드 · 이 얼굴은 정밀 표정을 인식하지 못합니다. 표정·회전 변형은 적용되지 않습니다.')
         self.submit(work, done, '선택한 얼굴의 합성 미리보기 만드는 중…')
 
     def export(self):
@@ -351,6 +351,10 @@ class FaceSwapGUI:
             skipped = sum(b-a+1 for a, b in report['skipped_tracking_ranges'])
             self.status.set(f'저장 완료: {destination} · 합성 {report["replaced_frames"]}프레임 · 추적 중단 {skipped}프레임')
             detail = f'720p MP4 · 스테레오 저장 완료\n{destination}\n\n합성: {report["replaced_frames"]}/{report["frames"]}프레임'
+            modes = report['mode_frames']
+            detail += f'\n정밀 표정: {modes["mesh"]}프레임 · 영역 추적: {modes["region"]}프레임'
+            if modes['region']:
+                detail += '\n영역 추적 구간에는 표정 변형이 적용되지 않았습니다.'
             if skipped:
                 detail += f'\n추적을 잃은 {skipped}프레임은 원본입니다. 해당 구간에 선택 시점을 추가하여 다시 합성하세요.'
             messagebox.showinfo('합성 완료', detail)
