@@ -3,6 +3,7 @@ import argparse
 import json
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -11,6 +12,7 @@ sys.path.insert(0, str(ROOT))
 from src.local.faces import Landmarker, extract_face
 from src.local.media import WORKSPACE, normalize_video
 from src.local.pipeline import render_video
+from src.local.identity import CompositeSettings
 
 
 def main():
@@ -23,7 +25,16 @@ def main():
     selection.add_argument('--selections', help='JSON report or {frame_index: [x,y,w,h]} in normalized 30fps video')
     parser.add_argument('--start-frame', type=int, default=0)
     parser.add_argument('--region-mode', action='store_true')
+    parser.add_argument('--preset', choices=('legacy', 'balanced', 'strong'), default='balanced')
+    for name in ('identity', 'lighting', 'skin-color', 'detail'):
+        parser.add_argument('--'+name, type=float, help='Override preset coefficient (identity: 0-0.65; others: 0-1)')
     args = parser.parse_args()
+    try:
+        settings = replace(CompositeSettings.preset(args.preset), **{
+            name: getattr(args, name) for name in ('identity', 'lighting', 'skin_color', 'detail')
+            if getattr(args, name) is not None})
+    except ValueError as error:
+        parser.error(str(error))
     if Path(args.out).resolve() in {Path(args.video).resolve(), Path(args.face).resolve()}:
         parser.error('Output must differ from input files')
     selections = {args.start_frame: args.roi}
@@ -40,7 +51,7 @@ def main():
             asset = extract_face(args.face, temp/'cutout.png', model)
             report = render_video(video, asset, selections, args.out, model,
                                   lambda p, message: print(f'{p:.0%} {message}', flush=True),
-                                  force_region=args.region_mode)
+                                  force_region=args.region_mode, settings=settings)
             print(json.dumps(report, ensure_ascii=False, indent=2))
         finally:
             model.close()

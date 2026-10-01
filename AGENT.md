@@ -348,3 +348,49 @@ git switch -c feature/<작업명>
 - 실제 사용자 영상과 단일 사진에서의 모든 3D 근육/가림/극단적 측면 재현은 검증되지 않았다. 합성된 표정 테스트는 실제 근육 움직임 영상의 대체물이 아니다.
 - 영역 모드는 여전히 표정 전이를 하지 않는다. 완료 창에 정밀/영역 프레임 수를 각각 표시한다.
 - 매 프레임 분할과 852개 삼각형 연산으로 CPU 처리 시간이 늘어난다. 실시간 처리 성능을 보장하지 않는다.
+
+## 15. 실제 YouTube 10초 검증 (2026-10-01)
+
+- 업데이트 1의 코드 `9de1c82`로 NASA 영상 `https://www.youtube.com/watch?v=u80H3FpTezA`의 34–44초 Jessica Meir 구간에 앞선 테스트의 `astronaut.png` 얼굴을 합성했다.
+- 산출물: `outputs/youtube_quality_20261001/face_swap_10s.mp4`, `comparison_10s.mp4`, `quality_contact_sheet.jpg`, `quality_metrics.json`, `QUALITY_REPORT.ko.md`. 이 폴더는 Git에서 제외되므로 다른 환경에는 별도로 전달한다.
+- 실행 도구: `workspace/youtube-qa/render_sample.py`, `quality_check.py`. 다운로드용 yt-dlp 2026.8.19는 `.runtime/qa-tools`에 격리했으며 제품 의존성을 변경하지 않았다.
+- 720p/30fps H.264 MP4, AAC 48kHz 스테레오. 전체 300프레임 디코딩 정상. 300/300프레임 메시 합성, 추적 건너뜀/영역 대체 없음. 렌더 221.15초. 원본 대비 오디오 파형 측정 지연 0ms.
+- 100개 샘플에서 눈 개방비 변화 상관 약 0.985, 입 약 0.979. 동일 모델 계열에 의한 측정으로 자연스러움 점수나 독립적 품질 검증이 아니다.
+- **품질 판정: 추적과 파일 규격은 통과하나 자연스러움은 미달.** 초별 확대 비교에서 이마를 가로지르는 경계, 피부톤 차이, 2–3초 중립 표정의 미소 잔상, 6초 부근 눈꺼풀 흐림이 보였다. 다음 작업은 이마 매트/색상 경계와 표정 질감 보완을 우선한다. 회귀 테스트 통과를 실제 자연스러운 합성의 증거로 취급하지 않는다.
+- 이번에는 엔진에 ROI 데이터를 직접 전달했다. GUI 드래그 자체, 극단적 측면/가림/여러 인물, 전 프레임의 미세한 떨림에 대한 육안 검증은 포함하지 않았다.
+
+## 16. 교체 얼굴 특징 조절 (2026-10-01)
+
+사용자가 요청한 닮음/움직임 균형 개선을 같은 `feature/natural-face-expression` 브랜치에서 진행했다. 새 모델이나 패키지는 추가하지 않았다.
+
+### 인터페이스와 기본값
+
+- `src/local/identity.py`의 불변 `CompositeSettings(identity, lighting, skin_color, detail)`를 `composite(..., settings=...)`, `render_video(..., settings=...)`로 전달한다. 설정 생략은 기존 계수 유지이며, GUI/CLI의 명시적인 기본 프리셋은 balanced다.
+- 프리셋 순서: identity / lighting / skin_color / detail. legacy `(0, .65, .45, .25)`, balanced `(.35, .50, .25, .10)`, strong `(.55, .40, .15, .05)`.
+- identity 범위 0–0.65, 나머지 0–1. NaN/무한대/범위 초과 거부. CLI `--preset` 뒤 개별 `--identity`, `--lighting`, `--skin-color`, `--detail`로 덮어쓸 수 있다.
+- GUI 영상 아래 프리셋과 네 계수를 표시한다. 변경 후 선택 시점 미리보기와 실제 저장에 같은 설정 스냅샷을 사용한다. 영역 모드에서는 비율 조절을 비활성화하며 엔진에서도 무시한다.
+
+### 합성 방식과 한계
+
+- 선택 시점마다 `IdentityState`를 초기화한다. 눈 축과 얼굴 폭으로 source/driver를 정규화하고 눈 간격, 코 폭, 입 폭 차이를 추출한다. 눈/입 개방과 입꼬리 높이는 교체 사진에서 복사하지 않는다.
+- 2D 공간에서 특징별 변형을 부드럽게 주변 피부로 연결하고 얼굴 외곽에서는 0으로 감쇠한다. 얼굴 폭 대비 변위 상한을 두며 유효한 삼각형의 반전·면적 붕괴가 발생하면 전체 안전 강도를 절반씩 줄인다.
+- 프리셋별 강도 역전을 막기 위해 최대 0.65에서 공통 안전 한도를 구한 뒤 요청 강도를 비례 적용한다. 안전 한도 하락은 즉시 반영하고 회복은 0.1 계수로 완화한다. 실제 적용 강도는 요청값보다 상당히 낮을 수 있다.
+- 눈 내부/입안도 원본 영상에서 새 위치로 변형한다. 타깃 헤어/비얼굴 보호 마스크를 이동한 내부 영역에도 적용한다. 색상 보정은 원본 프레임의 피부 기준을 사용한다.
+- 보고서 엔진명 `dense-expression-v3`, `composite_settings`, `identity_geometry_frames`, `identity_reduced_frames`, `identity_reduction_steps`, `identity_applied_strength_min`, `identity_applied_strength_mean` 추가. 감소 프레임은 안전 회복 중인 프레임도 포함한다.
+- 사진의 정적 미소 질감, 이마 경계 및 3D 자세 문제는 남는다. 코 폭 등은 2D 투영 비율이며 3D 신원 복원이나 학습 기반 identity transfer가 아니다. 첫 프레임의 표정/자세가 기준 비율에 영향을 줄 수 있다.
+- 선택 시점 미리보기는 상태를 새로 초기화한다. 이후 프레임의 누적 색상/안전 강도 상태까지 미리보기와 같다고 주장하지 않는다.
+
+### 검증과 재현
+
+- 최종 엔진 기준 `test_local_*.py` **37개 통과, skip 없음, 41.444초**. 기존 동작 호환, 형태 강도, 사진의 미소/깜빡임 비복사, 눈·입안 이동, 헤어 보호, 반전 방지, 설정 유효성, GUI 미리보기/저장 설정 일치, 재선택과 결과 통계를 포함한다. CLI `--help`도 Windows 기본 문자 인코딩에서 확인했다.
+- `scripts/compare_identity.py`: 정규화한 영상, 얼굴, selections를 받아 세 프리셋 MP4와 얼굴 기준 사진이 포함된 4열 비교 영상을 생성. `--preview-only`는 정적 미리보기만 생성. `--presets balanced strong`은 기존 legacy 결과를 보존하고 두 설정만 재생성한다.
+- `scripts/check_identity_quality.py`: 프리셋별 전체 디코딩, 3프레임 간격 눈·입 개방비 변화, 원본 대비 오디오 지연, 실제 렌더 프레임 비교 이미지를 생성한다. 표정 상관계수 0.95를 회귀 기준으로 쓰며 닮음/자연스러움 점수로 해석하지 않는다.
+- 입력은 15절과 동일. 산출물은 Git에서 제외되는 `outputs/identity_quality_20261001/`에 저장한다. 다른 환경에는 입력과 출력을 별도로 전달한다.
+- 실제 세 프리셋 10초 검증 완료: 각각 300/300프레임 메시 합성, 추적 건너뜀 0, 720p/30fps H.264/AAC 스테레오, 전체 디코딩 정상, 오디오 지연 0ms. 눈/입 변화 상관은 legacy 0.979–0.985, balanced 0.984–0.988, strong 0.979–0.987로 모두 0.95 기준 통과.
+- 기존 프리셋 결과와 15절의 이전 결과는 300프레임 디코딩 픽셀이 완전히 동일했다. 새 설정의 실제 비율 강도 평균은 balanced 0.1004, strong 0.1578(요청 0.35/0.55)이며 안전 제한/회복으로 전 프레임에서 요청값보다 낮았다. 형태 개선이 제한적임을 설명해야 한다.
+- 렌더 시간 legacy 219.53초, balanced 267.86초, strong 266.41초. 확대 비교에서 교체 이미지의 색·질감은 더 남으나 이마 경계와 중립 표정의 미소 질감은 여전히 보였다. `QUALITY_REPORT.ko.md`에 한계와 실제 확인 범위를 명시했다. 결과를 자연스러운 신원 교체의 완성으로 주장하지 않는다.
+
+```powershell
+.venv\Scripts\python.exe scripts/compare_identity.py --video outputs/youtube_quality_20261001/source_10s.mp4 --face workspace/test-assets/astronaut.png --selections outputs/youtube_quality_20261001/selections.json --out-dir outputs/identity_quality_20261001
+.venv\Scripts\python.exe scripts/check_identity_quality.py --source outputs/youtube_quality_20261001/source_10s.mp4 --folder outputs/identity_quality_20261001 --roi 450 100 380 400
+```

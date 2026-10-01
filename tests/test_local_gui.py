@@ -3,6 +3,8 @@ import time
 import tkinter as tk
 import unittest
 from types import SimpleNamespace
+from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -48,6 +50,34 @@ class GuiTests(unittest.TestCase):
             time.sleep(.02)
         self.assertEqual(output, [42])
         self.assertFalse(self.app.busy)
+
+    def test_presets_region_controls_and_busy_restore(self):
+        self.assertEqual(self.app.composite_settings().identity, .35)
+        self.app.preset_name.set('특징 강화')
+        self.app.apply_preset()
+        self.assertEqual(self.app.composite_settings().identity, .55)
+        self.app.force_region.set(True)
+        self.app.region_changed()
+        self.app.set_busy(True)
+        self.app.set_busy(False)
+        self.assertEqual(str(self.app.setting_controls['identity']['state']), 'disabled')
+        self.assertEqual(str(self.app.preset_combo['state']), 'readonly')
+
+    def test_preview_and_export_receive_identical_settings(self):
+        self.app.asset = SimpleNamespace()
+        self.app.video = Path('test-video.mp4')
+        self.app.original = self.app.video.resolve()
+        self.app.selections = {0: (100,100,200,200)}
+        self.app.setting_vars['identity'].set(.45)
+        self.app.submit = lambda work, done, label: work()
+        with patch('src.local.gui.Landmarker'), patch('src.local.gui.SelectedTracker'), \
+             patch('src.local.gui.composite', return_value=self.app.frame) as preview, \
+             patch('src.local.gui.render_video') as render, \
+             patch('src.local.gui.filedialog.asksaveasfilename', return_value='test-output.mp4'):
+            self.app.refresh_preview()
+            self.app.export()
+        self.assertEqual(preview.call_args.kwargs['settings'], render.call_args.kwargs['settings'])
+        self.assertEqual(render.call_args.kwargs['settings'].identity, .45)
 
 
 if __name__ == '__main__':

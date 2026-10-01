@@ -137,6 +137,18 @@ class LocalPipelineTests(unittest.TestCase):
         self.assertGreater(np.sqrt(np.mean(samples**2)), .01)
         self.assertLess(np.mean(np.abs(samples[:, 0]-samples[:, 1])), .005)
 
+    def test_identity_report_and_reselection_state(self):
+        from dataclasses import asdict
+        from src.local.identity import CompositeSettings
+        settings = CompositeSettings.preset('balanced')
+        report = render_video(self.normalized, self.asset, {0: self.box, 9: self.box},
+                              self.folder/'identity.mp4', self.model, settings=settings)
+        self.assertEqual(report['composite_settings'], asdict(settings))
+        self.assertEqual(report['identity_geometry_frames'], report['mode_frames']['mesh'])
+        self.assertEqual(report['identity_geometry_frames'], 18)
+        self.assertGreater(report['identity_applied_strength_mean'], 0)
+        self.assertLessEqual(report['identity_applied_strength_mean'], settings.identity)
+
     def test_cancel_and_output_protection(self):
         event = threading.Event()
         event.set()

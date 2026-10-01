@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from dataclasses import asdict
 from pathlib import Path
 
 import cv2
@@ -10,11 +11,13 @@ from .faces import composite
 from .media import Cancelled, export_mp4, video_info, write_json
 from .tracking import SelectedTracker
 from .expression import BlendState
+from .identity import CompositeSettings, IdentityState
 
 
 def render_video(video, asset, selections, destination, landmarker, progress=lambda *args: None,
-                 cancel=None, force_region=False):
+                 cancel=None, force_region=False, settings=None):
     """Selection keyframes restart tracking; earlier and lost frames remain original."""
+    settings = settings or CompositeSettings()
     video, destination = Path(video).resolve(), Path(destination).resolve()
     if video == destination or destination == asset.path.resolve():
         raise ValueError('입력 파일을 출력으로 덮어쓸 수 없습니다.')
@@ -41,6 +44,8 @@ def render_video(video, asset, selections, destination, landmarker, progress=lam
             raise RuntimeError('임시 영상 인코더를 열지 못했습니다.')
         tracker = None
         blend_state = BlendState()
+        identity_states = []
+        identity_state = IdentityState()
         index = 0
         try:
             while True:
@@ -52,13 +57,16 @@ def render_video(video, asset, selections, destination, landmarker, progress=lam
                 if index in selections:
                     tracker = SelectedTracker(frame, selections[index], landmarker, force_region)
                     blend_state = BlendState()
+                    identity_state = IdentityState()
+                    identity_states.append(identity_state)
                     state = tracker.current()
                     modes.add(tracker.mode)
                 else:
                     state = tracker.update(frame) if tracker else None
                 if state is not None:
                     frame = composite(frame, asset, state['points'], state['box'],
-                                      landmarker=landmarker, blend_state=blend_state)
+                                      landmarker=landmarker, blend_state=blend_state,
+                                      settings=settings, identity_state=identity_state)
                     replaced += 1
                     mode_frames[state['mode']] += 1
                 elif tracker is not None:
@@ -89,12 +97,18 @@ def render_video(video, asset, selections, destination, landmarker, progress=lam
                   'modes': sorted(modes), 'selections': selections, 'fps': info['fps'],
                   'resolution': [1280, 720], 'video_codec': 'h264', 'audio_codec': 'aac',
                   'audio_channels': 2, 'audio_sample_rate': 48000,
-                  'compositor': 'dense-expression-v2', 'mesh_vertices': 468,
+                  'compositor': 'dense-expression-v3', 'mesh_vertices': 468,
                   'mesh_triangles': len(asset.triangles), 'source_hair_segmentation': True,
                   'target_hair_segmentation': mode_frames['mesh'] > 0,
                   'mode_frames': mode_frames,
                   'expression_interiors': 'driving_eyes_and_inner_mouth' if mode_frames['mesh'] else None,
-                  'intermediate_codec': 'ffv1'}
+                  'intermediate_codec': 'ffv1',
+                  'composite_settings': asdict(settings),
+                  'identity_geometry_frames': sum(len(s.applied_strengths) for s in identity_states),
+                  'identity_reduced_frames': sum(s.reduced_frames for s in identity_states),
+                  'identity_reduction_steps': sum(s.reduction_steps for s in identity_states),
+                  'identity_applied_strength_min': min((v for s in identity_states for v in s.applied_strengths), default=0.),
+                  'identity_applied_strength_mean': float(sum(v for s in identity_states for v in s.applied_strengths)/max(1, sum(len(s.applied_strengths) for s in identity_states)))}
         write_json(temp/'report.json', report)
         os.replace(final, destination)
         os.replace(temp/'report.json', destination.with_suffix('.report.json'))

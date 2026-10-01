@@ -86,7 +86,7 @@ class BlendState:
         return self.shift
 
 
-def match_lighting(warped, target, alpha, state=None):
+def match_lighting(warped, target, alpha, state=None, settings=None):
     """Transfer local illumination, retaining uploaded skin texture and bounded color."""
     inside = alpha > .8
     if np.count_nonzero(inside) < 30:
@@ -96,11 +96,12 @@ def match_lighting(warped, target, alpha, state=None):
     shift = np.clip(np.median(target_lab[inside], axis=0)-np.median(source_lab[inside], axis=0), [-45, -18, -18], [45, 18, 18])
     if state is not None:
         shift = state.color_shift(shift)
-    source_lab += shift*np.array([.65, .45, .45])
+    lighting, color, detail = (.65, .45, .25) if settings is None else (settings.lighting, settings.skin_color, settings.detail)
+    source_lab += shift*np.array([lighting, color, color])
     # Local mid-frequency light variations carry cheek/nasolabial expression cues.
     sigma = max(2., min(alpha.shape)*.025)
     local = target_lab[..., 0]-cv2.GaussianBlur(target_lab[..., 0], (0, 0), sigma)
-    source_lab[..., 0] += np.clip(local, -12, 12)*.25
+    source_lab[..., 0] += np.clip(local, -12, 12)*detail
     return cv2.cvtColor(np.clip(source_lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR).astype(np.float32)
 
 

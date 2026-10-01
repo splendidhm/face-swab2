@@ -15,6 +15,7 @@ from .faces import Landmarker, composite, extract_face
 from .media import Cancelled, ROOT, WORKSPACE, normalize_video, read_frame
 from .pipeline import render_video
 from .tracking import SelectedTracker
+from .identity import CompositeSettings
 
 
 class FaceSwapGUI:
@@ -23,8 +24,8 @@ class FaceSwapGUI:
     def __init__(self, root):
         self.root = root
         root.title('FaceSwab2 · 선택한 얼굴 합성')
-        root.geometry('1160x800')
-        root.minsize(1120, 760)
+        root.geometry('1160x900')
+        root.minsize(1120, 860)
         self.events = queue.Queue()
         self.cancel = threading.Event()
         self.busy = False
@@ -36,6 +37,9 @@ class FaceSwapGUI:
         self.rect = None
         self.controls = []
         self.force_region = tk.BooleanVar(value=False)
+        self.preset_name = tk.StringVar(value='균형')
+        self.setting_vars = {name: tk.DoubleVar(value=value) for name, value in
+                             vars(CompositeSettings.preset('balanced')).items()}
         self.status = tk.StringVar(value='영상을 가져온 뒤, 바꿀 얼굴이 보이는 시점에서 드래그하세요.')
         self.position = tk.StringVar(value='0.00초 / 0.00초')
         self.video_label = tk.StringVar(value='선택된 영상 없음')
@@ -89,13 +93,33 @@ class FaceSwapGUI:
         self.button(right, '투명 얼굴 PNG 저장', self.save_face).pack(fill='x', pady=(8, 18))
         ttk.Label(right, text='3. 영상의 얼굴을 드래그', font=('맑은 고딕', 11, 'bold')).pack(anchor='w')
         ttk.Label(right, textvariable=self.selection_label, wraplength=220).pack(anchor='w', pady=8)
-        check = ttk.Checkbutton(right, text='영역 모드 (표정 변형 없음)', variable=self.force_region, command=self.refresh_preview)
+        check = ttk.Checkbutton(right, text='영역 모드 (표정 변형 없음)', variable=self.force_region, command=self.region_changed)
         check.pack(anchor='w')
         self.controls.append(check)
         ttk.Label(right, text='정밀 모드: 눈꺼풀·입술·볼 움직임 반영\n얼굴 인식 실패 시 영역 추적으로 전환', wraplength=220).pack(anchor='w', pady=6)
         self.button(right, '선택 시점 미리보기', self.refresh_preview).pack(fill='x', pady=3)
         self.button(right, '현재 시점 선택 지우기', self.clear_selection).pack(fill='x', pady=3)
         self.button(right, '모든 선택 지우기', self.clear_all).pack(fill='x', pady=3)
+        tuning = ttk.LabelFrame(left, text='교체 얼굴 특징 · 값을 바꾼 뒤 선택 시점 미리보기', padding=6)
+        tuning.pack(fill='x', pady=(8, 0))
+        self.preset_combo = ttk.Combobox(tuning, textvariable=self.preset_name,
+                                        values=('기존', '균형', '특징 강화'), state='readonly', width=10)
+        self.preset_combo.grid(row=0, column=0, padx=4)
+        self.preset_combo.bind('<<ComboboxSelected>>', self.apply_preset)
+        self.controls.append(self.preset_combo)
+        self.setting_controls = {}
+        for column, (name, label) in enumerate((('identity', '얼굴 비율'), ('lighting', '밝기 보정'),
+                                                ('skin_color', '피부색 보정'), ('detail', '원본 명암')), 1):
+            cell = ttk.Frame(tuning)
+            cell.grid(row=0, column=column, padx=9)
+            ttk.Label(cell, text=label).pack()
+            spin = ttk.Spinbox(cell, from_=0, to=.65 if name == 'identity' else 1., increment=.05,
+                               textvariable=self.setting_vars[name], width=7, format='%.2f',
+                               command=lambda: self.preset_name.set('사용자 설정'))
+            spin.bind('<KeyRelease>', lambda event: self.preset_name.set('사용자 설정'))
+            spin.pack()
+            self.setting_controls[name] = spin
+            self.controls.append(spin)
         bottom = ttk.Frame(shell)
         bottom.pack(fill='x', pady=(12, 0))
         self.button(bottom, '4. 합성 영상 저장', self.export).pack(side='left')
@@ -111,6 +135,22 @@ class FaceSwapGUI:
         for control in self.controls:
             control.configure(state='disabled' if value else 'normal')
         self.cancel_button.configure(state='normal' if value else 'disabled')
+        if not value:
+            self.preset_combo.configure(state='readonly')
+            self.setting_controls['identity'].configure(state='disabled' if self.force_region.get() else 'normal')
+
+    def composite_settings(self):
+        return CompositeSettings(**{name: value.get() for name, value in self.setting_vars.items()})
+
+    def apply_preset(self, event=None):
+        name = {'기존': 'legacy', '균형': 'balanced', '특징 강화': 'strong'}[self.preset_name.get()]
+        for key, value in vars(CompositeSettings.preset(name)).items():
+            self.setting_vars[key].set(value)
+        self.refresh_preview()
+
+    def region_changed(self):
+        self.setting_controls['identity'].configure(state='disabled' if self.force_region.get() else 'normal')
+        self.refresh_preview()
 
     def submit(self, work, done, label):
         if self.busy:
@@ -313,11 +353,16 @@ class FaceSwapGUI:
             self.status.set('선택 완료. 얼굴 이미지를 가져온 뒤 미리보기를 눌러주세요.')
             return
         frame, box, asset, force = self.frame.copy(), self.selections[self.index], self.asset, self.force_region.get()
+        try:
+            settings = self.composite_settings()
+        except (ValueError, tk.TclError) as error:
+            messagebox.showerror('합성 설정', str(error), parent=self.root)
+            return
         def work():
             model = Landmarker()
             try:
                 tracker = SelectedTracker(frame, box, model, force)
-                return composite(frame, asset, tracker.points, tracker.box, landmarker=model), tracker.mode
+                return composite(frame, asset, tracker.points, tracker.box, landmarker=model, settings=settings), tracker.mode
             finally:
                 model.close()
         def done(result):
@@ -330,6 +375,11 @@ class FaceSwapGUI:
     def export(self):
         if not self.video or not self.asset or not self.selections:
             messagebox.showinfo('입력 확인', '영상과 얼굴 이미지를 가져온 뒤 영상 속 얼굴을 드래그하세요.')
+            return
+        try:
+            settings = self.composite_settings()
+        except (ValueError, tk.TclError) as error:
+            messagebox.showerror('합성 설정', str(error), parent=self.root)
             return
         filename = filedialog.asksaveasfilename(title='합성 MP4 저장', initialdir=str(ROOT/'outputs'),
                                                initialfile='face_result.mp4', defaultextension='.mp4', filetypes=[('MP4', '*.mp4')])
@@ -344,7 +394,7 @@ class FaceSwapGUI:
             model = Landmarker()
             try:
                 return render_video(video, asset, selections, destination, model,
-                                    lambda p, s: self.events.put(('progress', p, s)), self.cancel, force)
+                                    lambda p, s: self.events.put(('progress', p, s)), self.cancel, force, settings=settings)
             finally:
                 model.close()
         def done(report):

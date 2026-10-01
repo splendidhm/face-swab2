@@ -10,6 +10,7 @@ from PIL import Image, ImageOps
 from .media import ROOT
 from .matting import FaceSegmenter, face_matte, contour_mask, inward_feather
 from .expression import anatomical_triangles, aperture_mask, dense_warp, match_lighting, multiband_blend
+from .identity import CompositeSettings, IdentityState
 
 MODEL = ROOT / 'models' / 'face_landmarker.task'
 # Anatomical face boundary; semantic segmentation separately removes hair.
@@ -136,32 +137,47 @@ def extract_face(path, output, landmarker):
 
 
 def composite(frame, asset, target_points=None, target_box=None, strength=1.0,
-              landmarker=None, blend_state=None):
+              landmarker=None, blend_state=None, settings=None, identity_state=None):
     """Dense expression mesh with semantic matting and preserved eye/mouth interiors."""
+    settings = settings or CompositeSettings()
     box = bbox(target_points[OVAL]) if target_points is not None else target_box
     try:
         x, y, w, h = clip_box(box, frame.shape)
     except ValueError:
         return frame
+    roi = frame[y:y+h, x:x+w].astype(np.float32)
+    interiors = None
+    interior_protection = np.ones((h, w), np.float32)
     if target_points is None:
         warped = cv2.resize(asset.image, (w, h)).astype(np.float32)
         alpha = cv2.resize(asset.alpha, (w, h)).astype(np.float32)/255
     else:
         target = (target_points - [x, y]).astype(np.float32)
-        warped, alpha = dense_warp(asset, target, (h, w))
+        identity_state = identity_state if identity_state is not None else IdentityState()
+        destination = identity_state.deform(asset.points, target, asset.triangles, settings.identity)
+        warped, alpha = dense_warp(asset, destination, (h, w))
         alpha *= inward_feather(contour_mask((h, w), target[OVAL]), max(1.5, w*.02))
         if landmarker is not None:
             probabilities = semantic_for_box(frame, (x, y, w, h), landmarker)
-            alpha *= face_matte(frame[y:y+h, x:x+w], target[OVAL], probabilities)/255
+            interior_protection = face_matte(frame[y:y+h, x:x+w], target[OVAL], probabilities)/255
+            alpha *= interior_protection
         # Warp the uploaded lips/eyelids; retain the driving pupils, teeth and tongue.
-        openings = aperture_mask((h, w), target)
+        openings = aperture_mask((h, w), destination)
         openings[openings > .999] = 1.
+        if settings.identity > 0 and not np.array_equal(target, destination):
+            # Move driving pupils/teeth with their surrounding eyelids/lips.
+            driving = FaceAsset(roi, np.full((h, w), 255, np.uint8), target, asset.triangles, asset.path)
+            interiors, coverage = dense_warp(driving, destination, (h, w))
+            interiors = np.where((coverage > .5)[..., None], interiors, roi)
         alpha *= 1-openings
-    roi = frame[y:y+h, x:x+w].astype(np.float32)
     alpha = np.clip(alpha*strength, 0, 1)
-    warped = match_lighting(warped, roi, alpha, blend_state)
+    warped = match_lighting(warped, roi, alpha, blend_state, settings)
     # Extend colors into transparent pixels before pyramid filtering to avoid dark halos.
     warped = np.where((alpha > .01)[..., None], warped, roi)
     output = frame.copy()
-    output[y:y+h, x:x+w] = np.rint(multiband_blend(warped, roi, alpha)).astype(np.uint8)
+    blended = multiband_blend(warped, roi, alpha)
+    if interiors is not None:
+        support = openings*interior_protection*np.clip(strength, 0, 1)
+        blended = blended*(1-support[..., None])+interiors*support[..., None]
+    output[y:y+h, x:x+w] = np.rint(blended).astype(np.uint8)
     return output
